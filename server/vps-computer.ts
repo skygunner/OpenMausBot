@@ -30,10 +30,11 @@ import { loadEnvironmentId } from "./environment.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { dockerCliMissing, dockerCliMissingProblem } from "./vps-hints.ts";
 
+import { hasNoPublishedPorts, homeVolume, verifyHomeVolume, vpsMounts, vpsMountsAllowed, VPS_CONTAINER_LABEL, VPS_ENVIRONMENT_LABEL } from "./vps-isolation.ts";
+export { vpsMountsAllowed, VPS_CONTAINER_LABEL, VPS_ENVIRONMENT_LABEL } from "./vps-isolation.ts";
+
 export const VPS_IMAGE = CUA_IMAGE;
 export const VPS_MANAGED_LABEL = "com.openmausbot.vps";
-export const VPS_CONTAINER_LABEL = "com.openmausbot.container";
-export const VPS_ENVIRONMENT_LABEL = "com.openmausbot.environment";
 export const VPS_VIEWER_LABEL = "com.openmausbot.vps-viewer";
 export const VPS_CONTAINER_PREFIX = "openmausbot-vps";
 export { dockerCliInstallCommand, vpsStartsForTurn, vpsUnavailableHint } from "./vps-hints.ts";
@@ -335,49 +336,6 @@ function viewerPassword(env: string[] | undefined): string | null {
   return value && /^[A-Za-z0-9_-]{8,128}$/.test(value) ? value : null;
 }
 
-function homeVolume(alias: string | undefined, name: string): string | null {
-  return alias && process.env.OMB_VPS_PERSISTENT_HOME === `${alias}/${name}` ? `${name}-home` : null;
-}
-
-async function verifyHomeVolume(name: string, volume: string, run: (args: string[]) => Promise<{ stdout: string }>) {
-  const [detail] = JSON.parse((await run(["volume", "inspect", volume])).stdout);
-  if (detail?.Name !== volume || detail.Driver !== "local" || Object.keys(detail.Options ?? {}).length ||
-      detail.Labels?.[VPS_CONTAINER_LABEL] !== name || detail.Labels?.[VPS_ENVIRONMENT_LABEL] !== vpsEnvironmentId()) {
-    throw new Error("The VPS home volume has unexpected ownership, driver or options");
-  }
-}
-
-function vpsMounts(detail: {
-  Mounts?: unknown;
-  HostConfig?: { Binds?: string[] | null; VolumesFrom?: string[] | null };
-}, volume: string | null): VpsComputerStatus["mounts"] {
-  if (!Array.isArray(detail.Mounts) || detail.HostConfig?.Binds?.length || detail.HostConfig?.VolumesFrom?.length) return "unsafe";
-  if (!volume) return detail.Mounts.length === 0 ? "none" : "unsafe";
-  const [m] = detail.Mounts;
-  return detail.Mounts.length === 1 && m?.Type === "volume" && m.Name === volume && m.Driver === "local" &&
-    m.Destination === "/home/cua" && m.RW === true ? "home" : "unsafe";
-}
-
-export function vpsMountsAllowed(mounts: VpsComputerStatus["mounts"]): boolean {
-  return mounts === "none" || mounts === "home";
-}
-
-function hasNoPublishedPorts(config: {
-  NetworkMode?: string;
-  PortBindings?: Record<string, unknown> | null;
-  PublishAllPorts?: boolean;
-} | undefined, networks?: Record<string, unknown> | null): boolean {
-  if (!config) return false;
-  const networkMode = (config.NetworkMode ?? "").toLowerCase();
-  if (!["default", "bridge"].includes(networkMode)) return false;
-  const attached = Object.keys(networks ?? {}).map((name) => name.toLowerCase());
-  if (attached.length !== 1 || !["default", "bridge"].includes(attached[0]!)) return false;
-  return (
-    config.PublishAllPorts !== true &&
-    !Object.values(config.PortBindings ?? {}).some((value) => Array.isArray(value) && value.length > 0)
-  );
-}
-
 function statusProblem(status: VpsComputerStatus): string | null {
   if (!status.configured) return "Configure a VPS SSH alias in AI › Other services";
   if (!status.daemonUp) return "Docker over SSH could not reach the VPS; check the SSH alias and Docker on the VPS";
@@ -480,7 +438,7 @@ async function computeVpsComputerStatus(
     const volume = homeVolume(alias, status.container_name);
     status.mounts = vpsMounts(detail ?? {}, volume);
     if (volume && status.mounts === "home") {
-      try { await verifyHomeVolume(status.container_name, volume, inspect); }
+      try { await verifyHomeVolume(status.container_name, volume, vpsEnvironmentId(), inspect); }
       catch (error) {
         status.mounts = "unsafe";
         status.problem = error instanceof Error ? error.message : "Cannot verify the VPS home volume";
@@ -1009,7 +967,7 @@ export async function vpsComputerAction(
           }
           if (!imageRef) throw Object.assign(new Error("The prepared VPS image could not be identified"), { status: 409 });
           const volume = homeVolume(alias, before.container_name);
-          if (volume) await verifyHomeVolume(before.container_name, volume, run);
+          if (volume) await verifyHomeVolume(before.container_name, volume, vpsEnvironmentId(), run);
           await run(vpsContainerRunArgs(before.container_name, imageRef, undefined, vpsResources(cfg), alias));
         } else {
           assertUsableContainer(before);
