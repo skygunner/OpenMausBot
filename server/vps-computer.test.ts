@@ -51,6 +51,7 @@ import {
   vpsContainerRunArgs,
   vpsDockerArgs,
   vpsLifecycleBusy,
+  vpsEnvironmentId,
   vpsSshTunnelArgs,
   vpsStartsForTurn,
   vpsUnavailableHint,
@@ -380,6 +381,32 @@ describe("VPS computer", () => {
       expect(fake.calls.some(({ args }) => ["rm", "run"].includes(args[2]!))).toBe(false);
     },
   );
+
+  it("reuses only the configured desktop's owned plain local home volume", async () => {
+    const name = vpsContainerName(BOT_ID);
+    const volume = `${name}-home`;
+    const mount = { Name: volume, Type: "volume", Driver: "local", Destination: "/home/cua", RW: true };
+    const info = { Name: volume, Driver: "local", Labels: { [VPS_CONTAINER_LABEL]: name, [VPS_ENVIRONMENT_LABEL]: vpsEnvironmentId() }, Options: {} };
+    const fake = fixture();
+    const runner: VpsCommandRunner = async (args, options) => {
+      if (args[2] === "volume") return { stdout: JSON.stringify([info]), stderr: "" };
+      const result = await fake.runner(args, options);
+      if (args[2] !== "inspect") return result;
+      const [detail] = JSON.parse(result.stdout);
+      return { ...result, stdout: JSON.stringify([{ ...detail, Mounts: [mount] }]) };
+    };
+    vi.stubEnv("OMB_VPS_PERSISTENT_HOME", `production-vps/${name}`);
+    try {
+      expect(vpsContainerRunArgs(name, undefined, undefined, undefined, "production-vps")).toContain(`type=volume,source=${volume},target=/home/cua`);
+      expect(vpsContainerRunArgs(name, undefined, undefined, undefined, "other")).not.toContain("--mount");
+      expect(await vpsComputerStatus(CONFIG, BOT_ID, runner)).toMatchObject({ mounts: "home", ready: true });
+      mount.Destination = "/elsewhere";
+      expect((await vpsComputerStatus(CONFIG, BOT_ID, runner)).ready).toBe(false);
+      mount.Destination = "/home/cua";
+      info.Options = { device: "/host" };
+      expect((await vpsComputerStatus(CONFIG, BOT_ID, runner)).ready).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
 
   it("refuses host mounts, public ports, and unowned containers", async () => {
     const mounted = await vpsComputerStatus(CONFIG, BOT_ID, fixture({ mounts: true }).runner);

@@ -106,7 +106,7 @@ export interface VpsComputerStatus {
   managed: boolean;
   container: "running" | "stopped" | "missing";
   network: "private" | "unsafe" | "unknown";
-  mounts: "none" | "unsafe" | "unknown";
+  mounts: "none" | "home" | "unsafe" | "unknown";
   security: "hardened" | "unsafe" | "unknown";
   desktopReady: boolean;
   desktop_error: string | null;
@@ -335,16 +335,31 @@ function viewerPassword(env: string[] | undefined): string | null {
   return value && /^[A-Za-z0-9_-]{8,128}$/.test(value) ? value : null;
 }
 
-function hasNoHostMounts(detail: {
+function homeVolume(alias: string | undefined, name: string): string | null {
+  return alias && process.env.OMB_VPS_PERSISTENT_HOME === `${alias}/${name}` ? `${name}-home` : null;
+}
+
+async function verifyHomeVolume(name: string, volume: string, run: (args: string[]) => Promise<{ stdout: string }>) {
+  const [detail] = JSON.parse((await run(["volume", "inspect", volume])).stdout);
+  if (detail?.Name !== volume || detail.Driver !== "local" || Object.keys(detail.Options ?? {}).length ||
+      detail.Labels?.[VPS_CONTAINER_LABEL] !== name || detail.Labels?.[VPS_ENVIRONMENT_LABEL] !== vpsEnvironmentId()) {
+    throw new Error("The VPS home volume has unexpected ownership, driver or options");
+  }
+}
+
+function vpsMounts(detail: {
   Mounts?: unknown;
   HostConfig?: { Binds?: string[] | null; VolumesFrom?: string[] | null };
-}): boolean {
-  return (
-    Array.isArray(detail.Mounts) &&
-    detail.Mounts.length === 0 &&
-    (!detail.HostConfig?.Binds || detail.HostConfig.Binds.length === 0) &&
-    (!detail.HostConfig?.VolumesFrom || detail.HostConfig.VolumesFrom.length === 0)
-  );
+}, volume: string | null): VpsComputerStatus["mounts"] {
+  if (!Array.isArray(detail.Mounts) || detail.HostConfig?.Binds?.length || detail.HostConfig?.VolumesFrom?.length) return "unsafe";
+  if (!volume) return detail.Mounts.length === 0 ? "none" : "unsafe";
+  const [m] = detail.Mounts;
+  return detail.Mounts.length === 1 && m?.Type === "volume" && m.Name === volume && m.Driver === "local" &&
+    m.Destination === "/home/cua" && m.RW === true ? "home" : "unsafe";
+}
+
+export function vpsMountsAllowed(mounts: VpsComputerStatus["mounts"]): boolean {
+  return mounts === "none" || mounts === "home";
 }
 
 function hasNoPublishedPorts(config: {
@@ -371,7 +386,7 @@ function statusProblem(status: VpsComputerStatus): string | null {
   if (!status.imageMatches) return "The VPS container uses an incompatible or untrusted OpenMausBot image";
   if (!status.managed) return "The VPS container name is occupied by a container OpenMausBot did not create";
   if (status.network === "unsafe") return "The VPS container uses an unapproved network or publishes ports; refusing to use it";
-  if (status.mounts === "unsafe") return "The VPS container has host mounts; refusing to use it";
+  if (status.mounts === "unsafe") return "The VPS container has unexpected mounts; refusing to use it";
   if (status.security === "unsafe") return "The VPS container has unsupported privilege, isolation, or automatic-removal settings";
   if (status.container === "stopped") return "The OpenMausBot VPS container is stopped";
   if (status.desktop_error) return `The VPS Cua desktop failed to start: ${status.desktop_error}`;
@@ -462,7 +477,16 @@ async function computeVpsComputerStatus(
       (environmentLabel === undefined || environmentLabel === vpsEnvironmentId());
     if (status.managed && status.container_id) raisePidsLimit(status.container_id, detail?.HostConfig?.PidsLimit, run);
     status.network = hasNoPublishedPorts(detail?.HostConfig, detail?.NetworkSettings?.Networks) ? "private" : "unsafe";
-    status.mounts = hasNoHostMounts(detail ?? {}) ? "none" : "unsafe";
+    const volume = homeVolume(alias, status.container_name);
+    status.mounts = vpsMounts(detail ?? {}, volume);
+    if (volume && status.mounts === "home") {
+      try { await verifyHomeVolume(status.container_name, volume, inspect); }
+      catch (error) {
+        status.mounts = "unsafe";
+        status.problem = error instanceof Error ? error.message : "Cannot verify the VPS home volume";
+        return status;
+      }
+    }
     status.security = dockerSecurityIsHardened(detail?.HostConfig, { restartPolicy: "any" })
       ? "hardened"
       : "unsafe";
@@ -483,7 +507,7 @@ async function computeVpsComputerStatus(
       status.imageMatches &&
       status.managed &&
       status.network === "private" &&
-      status.mounts === "none" &&
+      vpsMountsAllowed(status.mounts) &&
       status.security === "hardened";
     if (canProbe && containerRef) {
       try {
@@ -723,11 +747,13 @@ export function vpsContainerRunArgs(
   imageRef = VPS_IMAGE,
   viewerSecret = randomBytes(18).toString("base64url"),
   resources: DesktopResources = DEFAULT_DESKTOP_RESOURCES,
+  alias?: string,
 ): string[] {
   if (!CONTAINER_NAME.test(containerName) || (imageRef !== VPS_IMAGE && !IMAGE_ID.test(imageRef))) {
     throw new Error("invalid managed VPS container or image reference");
   }
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(viewerSecret)) throw new Error("invalid managed VPS viewer secret");
+  const volume = homeVolume(alias, containerName);
   return [
     "run",
     "-d",
@@ -757,7 +783,7 @@ export function vpsContainerRunArgs(
     "private",
     "--cgroupns",
     "private",
-    // No host mounts, so root in this desktop can install packages without reaching the host's files.
+    ...(volume ? ["--mount", `type=volume,source=${volume},target=/home/cua`] : []),
     ...desktopCapArgs("docker"),
     "--shm-size",
     "512m",
@@ -776,7 +802,7 @@ function assertUsableContainer(status: VpsComputerStatus) {
     !status.imageMatches ||
     !status.managed ||
     status.network !== "private" ||
-    status.mounts !== "none" ||
+    !vpsMountsAllowed(status.mounts) ||
     status.security !== "hardened"
   ) {
     throw Object.assign(new Error(status.problem ?? "The existing VPS container is unsafe or incompatible"), {
@@ -825,7 +851,7 @@ async function waitForVpsReady(
       !status.managed ||
       status.container !== "running" ||
       status.network !== "private" ||
-      status.mounts !== "none" ||
+      !vpsMountsAllowed(status.mounts) ||
       status.security !== "hardened"
     ) {
       return status;
@@ -982,7 +1008,9 @@ export async function vpsComputerAction(
             imageRef = (await computeVpsComputerStatus(cfg, botId, runner)).image_id;
           }
           if (!imageRef) throw Object.assign(new Error("The prepared VPS image could not be identified"), { status: 409 });
-          await run(vpsContainerRunArgs(before.container_name, imageRef, undefined, vpsResources(cfg)));
+          const volume = homeVolume(alias, before.container_name);
+          if (volume) await verifyHomeVolume(before.container_name, volume, run);
+          await run(vpsContainerRunArgs(before.container_name, imageRef, undefined, vpsResources(cfg), alias));
         } else {
           assertUsableContainer(before);
           if (before.container === "stopped") {
