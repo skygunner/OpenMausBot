@@ -11875,6 +11875,8 @@
   "settings.features.skillBurgerLine": "Save a bot's run as steps you can run again",
   "settings.features.threadTabs": "Thread tabs",
   "settings.features.threadTabsLine": "Show a bot's threads as tabs above the chat",
+  "settings.features.teamBoard": "Board",
+  "settings.features.teamBoardLine": "Track work in group chats as items with a state, labels and what each one waits for",
   "settings.features.error": "Couldn't save that. Check your connection and try again.",
   "skillBurger.pill.cooking": "Cooking… {count}",
   "skillBurger.pill.add": "Add",

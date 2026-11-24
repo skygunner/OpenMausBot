@@ -9,9 +9,10 @@ import { SettingRow, SettingsGroup, SettingsRows, Switch } from "../../SettingsP
 const COPY: Record<Feature, { title: LocaleKey; line: LocaleKey }> = {
   skillBurger: { title: "settings.features.skillBurger", line: "settings.features.skillBurgerLine" },
   threadTabs: { title: "settings.features.threadTabs", line: "settings.features.threadTabsLine" },
+  teamBoard: { title: "settings.features.teamBoard", line: "settings.features.teamBoardLine" },
 };
 
-/** One switch kept in this place's config.json; shown once its server says it knows the switch. */
+/** One switch kept in this place's config.json; shown once its server says it knows the switch (the board: only a Team Cloud's). */
 function FeatureRow({ name }: { name: Feature }) {
   const on = useFeature(name);
   const known = useStoreSelector((state) => typeof state.config?.features?.[name] === "boolean");
@@ -47,6 +48,7 @@ export function FeaturesPage() {
       <SettingsRows>
         <FeatureRow name="skillBurger" />
         <FeatureRow name="threadTabs" />
+        <FeatureRow name="teamBoard" />
       </SettingsRows>
     </SettingsGroup>
   );
