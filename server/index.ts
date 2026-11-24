@@ -1,3 +1,4 @@
+import { captureDirectTurn, retainCompletion } from "./hindsight-completion.ts";
 // Import first: it reads a Cloud home's secrets off the launcher's pipe before any module can start a process.
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { startFailureText } from "./start-failure-text.ts";
@@ -5106,17 +5107,7 @@ bus.subscribe((event: RuntimeEvent) => {
 });
 
 function captureTurnFor(threadId: string, turnId: string): CaptureTurn | null {
-  const path = store.activePath(threadId);
-  const replyAt = path.findLastIndex((message) => message.role === "bot" && message.kind === "text" && message.turnId === turnId);
-  if (replyAt < 0) return null;
-  const asked = path.slice(0, replyAt).findLast((message) => message.role === "user" && message.kind === "text");
-  if (!asked || asked.peerAsk) return null;
-  return {
-    person: extractTurnImages(asked.text ?? "").text,
-    bot: path[replyAt]!.text ?? "",
-    owner: !asked.sender,
-    turnId,
-  };
+  return captureDirectTurn(store.activePath(threadId), turnId);
 }
 
 // Prompt-cache keep-warm (server/cache-keepwarm.ts; design from Cache Tax,
@@ -6662,6 +6653,13 @@ bus.subscribe((event: RuntimeEvent) => {
       let directSettled = () => {}; const settledDirect = new Promise<void>((resolve) => { directSettled = resolve; }); if (failed && bot) void quotaSwitch.turnFailed(bot, event, internal, Promise.all([settledDirect, directTurnDispatchClaims.released(event.threadId)]));
       else if (bot && event.ok) { quotaSwitch.turnSucceeded(bot, event.threadId); setupRecovery.succeeded(bot.id, event.threadId, { replayed, stopped }); }
       if (bot && event.ok && !stopped && completedTurnId && !routineRun && !coordinator.assignerOf(event.threadId)) askCards.ownQuestion(bot.id, event.threadId, completedTurnId);
+      const memoryFile = process.env.OMB_HINDSIGHT_COMPLETION_CONFIG;
+      if (memoryFile && bot && completedTurnId && event.ok && !stopped && !replayed && !internal && !routineRun && !CLOUD_HOME && !CLOUD_TEAM &&
+          !botApiThread(event.threadId) && !store.groupByThread(event.threadId) && !openPersonCard(event.threadId) && !coordinator.awaitingAnswer(event.threadId) &&
+          mcpServersHost.mounted(bot).hindsight) {
+        void retainCompletion(memoryFile, captureTurnFor(event.threadId, completedTurnId), sideJobs.text("memory", bot.id))
+          .catch(() => console.warn("Hindsight: could not retain a completion summary"));
+      }
       const lastReported = turnUsage.get(event.threadId);
       turnUsage.delete(event.threadId);
       const lastContext = turnContext.get(event.threadId);
