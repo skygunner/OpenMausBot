@@ -491,6 +491,19 @@ const bridge = {
     },
   },
 
+  /** Update all on Settings → Devices: this app's own page only (never REMOTE_SAFE; main checks the sender again). */
+  updateAll: {
+    survey: (fresh) => ipcRenderer.invoke("update-all:survey", fresh === true),
+    start: (ids, withApp) => ipcRenderer.invoke("update-all:start", ids, withApp === true),
+    retry: (id) => ipcRenderer.invoke("update-all:retry", id),
+    onState: (cb) => {
+      ipcRenderer.invoke("update-all:state").then((view) => cb(view)).catch(() => {});
+      const handler = (_event, view) => cb(view);
+      ipcRenderer.on("update-all:state", handler);
+      return () => ipcRenderer.removeListener("update-all:state", handler);
+    },
+  },
+
   /** A remote page may read the list but never change where this window goes. */
   environments: {
     state: () => ipcRenderer.invoke("environments:state"),
@@ -759,6 +772,8 @@ const bridge = {
       ? ipcRenderer.invoke("home:sign-in") : Promise.reject(new Error("Choose Sign in to sign in again.")),
     repair: () => ipcRenderer.invoke("home:repair"),
     updating: onHomePage && reloadedForUpdate(),
+    // My Cloud's own page, while its live stream is down: what the Admin says has it down (an update, resize, move...), or null.
+    operation: onHomePage ? () => ipcRenderer.invoke("home:operation") : undefined,
   },
   updatesConsent: {
     state: () => ipcRenderer.invoke("updates-consent:state"),

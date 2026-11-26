@@ -18,6 +18,8 @@ export type RequestAuth =
     kind: "loopback"; scopes: readonly Scope[]; trust?: "service";
     /** Set only on the verified companion-token path: the sidecar's id for the phone that authenticated. */
     companionDevice?: string;
+    /** Set only when the desktop's capability came from no browser page: the app's own main process (move-back.ts). */
+    desktopMain?: true;
   }
   | { kind: "session"; session: SessionRecord; via: "bearer" | "cookie" | "ticket"; scopes: readonly Scope[] };
 
@@ -422,6 +424,7 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["DELETE"], path: /^\/api\/groups\/[\w-]+\/queue\/[\w-]+$/ },
   { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/queue\/[\w-]+\/steer$/ },
   { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/tasks$/ },
+  { methods: ["GET"], path: /^\/api\/groups\/[\w-]+\/threads\/summary$/ },
   { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+\/forks$/ },
   { methods: ["POST", "PATCH", "DELETE"], path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+$/ },
   { methods: ["PATCH"], path: /^\/api\/groups\/[\w-]+$/ }, // display fields only: see clientGroupPatchViolation
@@ -479,10 +482,10 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/presence\/here$/ },
   // what a bot asks of this person: their own questions and approvals only
   { methods: ["GET"], path: /^\/api\/needs-you$/ },
-  // a person's own inbox: its lines, how many wait, and one of them read or done; the handler serves the session's own alone
+  // a person's own inbox: its lines, how many wait, and one of them read, unread again or done; the handler serves the session's own alone
   { methods: ["GET"], path: /^\/api\/inbox(?:\/count)?$/ },
   { methods: ["POST"], path: /^\/api\/inbox\/read-all$/ },
-  { methods: ["POST"], path: /^\/api\/inbox\/[\w-]+\/(?:read|done)$/ },
+  { methods: ["POST"], path: /^\/api\/inbox\/[\w-]+\/(?:read|unread|done)$/ },
   // who a Team Cloud bot can report to, and handing over a bot the member owns: the handler checks who may
   { methods: ["GET"], path: /^\/api\/team\/people$/ },
   // the workspace's banner picture: everyone signed in here sees it; changing it (PUT, DELETE) is an admin's
@@ -507,6 +510,11 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["GET"], path: /^\/api\/team-files(?:\/file)?$/ },
   { methods: ["PUT"], path: /^\/api\/team-files\/file$/ },
   { methods: ["POST"], path: /^\/api\/team-files\/(?:folder|rename|delete)$/ },
+  // a Team Cloud's board: the handler shows and changes an item only for someone who sees its room thread and may write in
+  // the room (routes/board.ts); off a Team Cloud, or with the board off, they answer 404
+  { methods: ["GET"], path: /^\/api\/board$/ },
+  { methods: ["POST"], path: /^\/api\/board\/items$/ },
+  { methods: ["PATCH", "DELETE"], path: /^\/api\/board\/items\/[\w-]+$/ },
   // Slack for Clouds: the Admin calls these with the member's own session, and the handler answers each as that member
   // alone, on a personal Cloud its owner alone (routes/team-slack.ts); off a Cloud they answer 404
   { methods: ["GET"], path: /^\/api\/slack\/team\/bots$/ },
@@ -740,7 +748,7 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
       }
       return { auth: { kind: "loopback", scopes: SERVICE_SCOPES, trust: "service" }, status: 401, error: "" };
     }
-    return { auth: { kind: "loopback", scopes: LOOPBACK_SCOPES }, status: 401, error: "" };
+    return { auth: { kind: "loopback", scopes: LOOPBACK_SCOPES, ...(desktopOwner && !fromBrowser(req) ? { desktopMain: true as const } : {}) }, status: 401, error: "" };
   }
 
   if (proxied) {

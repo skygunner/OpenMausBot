@@ -1,7 +1,7 @@
 // BYO Linux VPS: Docker's SSH transport reaches the user's daemon; one Cua MCP container per bot.
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createConnection, createServer, type AddressInfo } from "node:net";
+import { loopbackAnswers, unusedLoopbackPort } from "./vps-loopback.ts";
 import { OWN_GROUP, stopGroup } from "./group-exec.ts";
 import {
   BASE_IMAGE,
@@ -85,7 +85,7 @@ const pendingScreenshots = new Map<string, Promise<VpsScreenshot>>();
 const viewerConnections = new Map<string, { privateIp: string; password: string }>();
 const REMOTE_VIEWER_GRACE_MS = 30_000;
 const NATIVE_VIEWER_LIFETIME_MS = 8 * 60 * 60_000;
-type DesktopTunnel = { child: ReturnType<typeof spawn>; joinUrl: string; expiry: ReturnType<typeof setTimeout>; viewers: number; localViewer: boolean };
+type DesktopTunnel = { onViewerClosed?: () => void; child: ReturnType<typeof spawn>; joinUrl: string; expiry: ReturnType<typeof setTimeout>; viewers: number; localViewer: boolean };
 type TunnelStart = { cancelled: boolean; child?: ReturnType<typeof spawn> };
 const desktopTunnels = new Map<string, DesktopTunnel>();
 const pendingDesktopTunnels = new Map<string, { promise: Promise<DesktopTunnel>; start: TunnelStart }>();
@@ -191,38 +191,6 @@ export function vpsSshTunnelArgs(alias: string, localPort: number, privateIp: st
   ];
 }
 
-function unusedLoopbackPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      // SAFETY: bound to an IPv4 TCP address above, so Node returns AddressInfo, not a socket path.
-      const port = (probe.address() as AddressInfo).port;
-      probe.close((error) => {
-        if (error) reject(error);
-        else if (port >= 1024) resolve(port);
-        else reject(new Error("could not reserve a VPS viewer port"));
-      });
-    });
-  });
-}
-
-function loopbackAnswers(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = createConnection({ host: "127.0.0.1", port });
-    let settled = false;
-    const finish = (answer: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(answer);
-    };
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.setTimeout(250, () => finish(false));
-  });
-}
-
 function stopDesktopTunnel(botId: string, expected?: DesktopTunnel): boolean {
   if (!expected) {
     const pending = pendingDesktopTunnels.get(botId);
@@ -241,6 +209,12 @@ function stopDesktopTunnel(botId: string, expected?: DesktopTunnel): boolean {
   return true;
 }
 
+function endViewerTunnel(botId: string, tunnel: DesktopTunnel): boolean {
+  if (!stopDesktopTunnel(botId, tunnel)) return false;
+  tunnel.onViewerClosed?.();
+  return true;
+}
+
 export function closeVpsDesktopTunnel(botId: string) {
   const tunnel = desktopTunnels.get(botId);
   if (tunnel?.viewers) {
@@ -248,7 +222,11 @@ export function closeVpsDesktopTunnel(botId: string) {
     clearTimeout(tunnel.expiry);
     return { closed: false };
   }
-  return { closed: stopDesktopTunnel(botId) };
+  return { closed: tunnel ? endViewerTunnel(botId, tunnel) : stopDesktopTunnel(botId) };
+}
+
+export function stopVpsDesktopTunnel(botId: string): boolean {
+  return stopDesktopTunnel(botId);
 }
 
 export function closeAllVpsDesktopTunnels(): void {
@@ -273,7 +251,7 @@ export function vpsDesktopConnection(botId: string) {
         tunnel.viewers--;
         if (!tunnel.viewers && !tunnel.localViewer && desktopTunnels.get(botId) === tunnel) {
           tunnel.expiry = setTimeout(() => {
-            stopDesktopTunnel(botId, tunnel);
+            endViewerTunnel(botId, tunnel);
           }, REMOTE_VIEWER_GRACE_MS);
           tunnel.expiry.unref();
         }
@@ -356,6 +334,7 @@ async function computeVpsComputerStatus(
   cfg: AppConfig,
   botId: string,
   runner: VpsCommandRunner,
+  requireEnvironmentLabel = false,
 ): Promise<VpsComputerStatus> {
   const alias = vpsSshAlias(cfg);
   const status = emptyStatus(botId, alias);
@@ -432,7 +411,7 @@ async function computeVpsComputerStatus(
     status.managed =
       labels?.[VPS_MANAGED_LABEL] === "1" &&
       labels?.[VPS_CONTAINER_LABEL] === status.container_name &&
-      (environmentLabel === undefined || environmentLabel === vpsEnvironmentId());
+      ((!requireEnvironmentLabel && environmentLabel === undefined) || environmentLabel === vpsEnvironmentId());
     if (status.managed && status.container_id) raisePidsLimit(status.container_id, detail?.HostConfig?.PidsLimit, run);
     status.network = hasNoPublishedPorts(detail?.HostConfig, detail?.NetworkSettings?.Networks) ? "private" : "unsafe";
     const volume = homeVolume(alias, status.container_name);
@@ -521,6 +500,18 @@ async function computeVpsComputerStatus(
   status.problem = statusProblem(status);
   status.ready = status.problem === null;
   return status;
+}
+
+export async function vpsComputerRunning(cfg: AppConfig, botId: string, runner: VpsCommandRunner = defaultRunner): Promise<boolean> {
+  const alias = vpsSshAlias(snapshotVpsConfig(cfg));
+  if (!alias) return false;
+  const name = vpsContainerName(botId);
+  try {
+    const detail = (JSON.parse((await runner(vpsDockerArgs(alias, ["inspect", name]), { timeoutMs: 10_000 })).stdout) as Array<{ Config?: { Labels?: Record<string, string> }; State?: { Running?: boolean } }>)[0];
+    const labels = detail?.Config?.Labels;
+    const environmentLabel = labels?.[VPS_ENVIRONMENT_LABEL];
+    return Boolean(detail?.State?.Running && labels?.[VPS_MANAGED_LABEL] === "1" && labels?.[VPS_CONTAINER_LABEL] === name && (environmentLabel === undefined || environmentLabel === vpsEnvironmentId()));
+  } catch { return false; }
 }
 
 export async function vpsComputerStatus(
@@ -941,6 +932,7 @@ export async function vpsComputerAction(
   cfg: AppConfig,
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
+  shouldStop?: () => boolean,
 ): Promise<VpsComputerStatus> {
   cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
@@ -951,8 +943,9 @@ export async function vpsComputerAction(
   const operation = async () => {
     invalidateVpsStatus(key);
     try {
-      const before = await computeVpsComputerStatus(cfg, botId, runner);
+      const before = await computeVpsComputerStatus(cfg, botId, runner, Boolean(shouldStop));
       if (!before.daemonUp) throw Object.assign(new Error(before.problem ?? "Docker over SSH is not reachable"), { status: 409 });
+      if (action === "stop" && shouldStop && (before.container !== "running" || !before.managed || !shouldStop())) return before;
       if (action === "provision" && before.ready) return before;
       if (action !== "provision" || before.container !== "running") stopDesktopTunnel(botId);
       const run = (args: string[], timeoutMs = 2 * 60_000) => runner(vpsDockerArgs(alias, args), { timeoutMs });
@@ -1045,6 +1038,7 @@ export async function vpsComputerJoin(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
   remoteViewer = false,
+  onViewerClosed?: () => void,
 ): Promise<{ joinUrl: string; state: "running" }> {
   cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
@@ -1052,7 +1046,7 @@ export async function vpsComputerJoin(
 
   let tunnel = desktopTunnels.get(botId);
   if (tunnel && (tunnel.child.exitCode !== null || tunnel.child.killed)) {
-    stopDesktopTunnel(botId, tunnel);
+    endViewerTunnel(botId, tunnel);
     tunnel = undefined;
   }
   if (!tunnel) {
@@ -1065,11 +1059,12 @@ export async function vpsComputerJoin(
     try { tunnel = await pending.promise; }
     finally { if (pendingDesktopTunnels.get(botId) === pending) pendingDesktopTunnels.delete(botId); }
   }
+  if (onViewerClosed) tunnel.onViewerClosed = onViewerClosed;
   if (!remoteViewer) tunnel.localViewer = true;
   if (!tunnel.viewers || tunnel.localViewer) {
     clearTimeout(tunnel.expiry);
     const current = tunnel;
-    tunnel.expiry = setTimeout(() => stopDesktopTunnel(botId, current), tunnel.localViewer ? NATIVE_VIEWER_LIFETIME_MS : REMOTE_VIEWER_GRACE_MS);
+    tunnel.expiry = setTimeout(() => endViewerTunnel(botId, current), tunnel.localViewer ? NATIVE_VIEWER_LIFETIME_MS : REMOTE_VIEWER_GRACE_MS);
     tunnel.expiry.unref();
   }
   return { joinUrl: tunnel.joinUrl, state: "running" };
@@ -1115,6 +1110,7 @@ async function startDesktopTunnel(cfg: AppConfig, botId: string, alias: string, 
     if (active?.child === child) {
       clearTimeout(active.expiry);
       desktopTunnels.delete(botId);
+      active.onViewerClosed?.();
     }
     if (!failure) failure = stderr.trim() || `SSH viewer tunnel exited ${code ?? "without a status"}`;
   });
@@ -1135,7 +1131,7 @@ async function startDesktopTunnel(cfg: AppConfig, botId: string, alias: string, 
   const joinUrl = `http://127.0.0.1:${localPort}/vnc.html#autoconnect=true&resize=scale&password=${encodeURIComponent(connection.password)}`;
   const tunnel: DesktopTunnel = {
     child, joinUrl, viewers: 0, localViewer: false,
-    expiry: setTimeout(() => stopDesktopTunnel(botId, tunnel), REMOTE_VIEWER_GRACE_MS),
+    expiry: setTimeout(() => endViewerTunnel(botId, tunnel), REMOTE_VIEWER_GRACE_MS),
   };
   tunnel.expiry.unref();
   desktopTunnels.set(botId, tunnel);
