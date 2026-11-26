@@ -8,6 +8,7 @@ describe("announcesAction", () => {
     "I'm in the VM and I will check the files.",
     "I’m in the VM and will launch XFCE Terminal first.",
     "I'll open the browser.",
+    "I’ll check the service health.",
     "Opening the page now:",
     "Got the structure. Now I'll pull the actual content from each — inbox, tasks, unread messages, and today's calendar.",
     "Yes, I'm here. Let me pull from all four MCP servers now.",
@@ -18,6 +19,8 @@ describe("announcesAction", () => {
 
   it.each([
     "我会把 Google Tasks 里的未完成事项和已同步的日历节点放到同一个看板，分开显示截止日、评审和无日期待办。",
+    "我会读取\n项目日志。",
+    "> 示例\n\n我现在直接检查项目文档。",
     "我先查看文件：",
     "不是。OpenMausBot 的执行不一定在 Docker 里；云电脑的命令执行目前是在 Docker 容器里。 我上一条把这些混在一起说了，导致你误解。我现在查一下容器和宿主的关系。",
     "我现在去核对运行记录。",
@@ -56,6 +59,8 @@ describe("announcesAction", () => {
     "我会用一个例子解释如何创建看板。打开设置，点击新建即可。",
     "    我会先运行命令。",
     `${"先前检查的实际结果如下。".repeat(50)}\n\n    我会先运行命令。`,
+    "> 以下是示例回复\n我现在直接检查项目文档。",
+    "我现在确认：项目文档已检查完毕，无需继续操作。",
     "> 我会读取文件。",
     `检查已完成。${"这里是核对结果。".repeat(70)}\n\n检查结果：`,
   ])("does not nudge Chinese questions, waits, quotes or final replies: %s", text => {
