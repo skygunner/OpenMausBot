@@ -462,6 +462,12 @@
           "live": {
             "type": "boolean"
           },
+          "uses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "app_id": {
             "type": "string"
           }
