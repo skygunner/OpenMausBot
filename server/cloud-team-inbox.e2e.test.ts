@@ -162,7 +162,7 @@ async function askedOfBen(ask: (requestId: string) => Record<string, unknown>) {
 
 beforeAll(async () => {
   broker = await startBrokerFake();
-  fx = await launchCloudSendFixture({ onePasswordToken: TOKEN, broker, team: { id: "team-acme-1", name: "Acme", engine: ENGINE } });
+  fx = await launchCloudSendFixture({ onePasswordToken: TOKEN, broker, team: { id: "team-acme-1", name: "Acme", engine: ENGINE, env: { OMB_BOT_BOX: "0" } } });
   team = fx.team!;
   writeFileSync(file("release"), "");
   cleo = (await team.pair(CLEO)).token!;

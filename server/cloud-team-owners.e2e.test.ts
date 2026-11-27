@@ -37,7 +37,7 @@ const letGo = () => writeFileSync(release(), "");
 
 beforeAll(async () => {
   broker = await startBrokerFake();
-  fx = await launchCloudSendFixture({ onePasswordToken: TOKEN, broker, team: { id: "team-acme-1", name: "Acme", engine: ENGINE } });
+  fx = await launchCloudSendFixture({ onePasswordToken: TOKEN, broker, team: { id: "team-acme-1", name: "Acme", engine: ENGINE, env: { OMB_BOT_BOX: "0" } } });
   team = fx.team!;
   letGo();
   olive = (await team.pair(OLIVE)).token!;
